@@ -2,15 +2,21 @@ import argparse
 import os
 from warcio.archiveiterator import ArchiveIterator
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
 from transformers import pipeline
 import sqlite3
 import re
+import time
+import logging
+
+logging.basicConfig(filename="analyze.log", 
+                    format='%(asctime)s: %(levelname)s: %(message)s', 
+                    level=logging.INFO)
 
 # Argument parsing
 parser = argparse.ArgumentParser()
-parser.add_argument('--warc_dir', type=str, default='/lfs01/datasets/commoncrawl/2023-2024/data.commoncrawl.org/crawl-data/CC-NEWS/2023', help='Base directory for WARC files')
-parser.add_argument('--db_name', type=str, default='cc2023.db', help='SQLite database name')
+parser.add_argument('--warc_dir', type=str, default='/mnt/commoncrawl', help='Base directory for WARC files')
+parser.add_argument('--db_name', type=str, default='newswarc.db', help='SQLite database name')
 args = parser.parse_args()
 
 # Initialize the zero-shot classification pipeline
@@ -47,7 +53,8 @@ def is_english_page(content):
             "when", "up", "use", "your", "how", "said", "an", "each", "she"]))
         return english_count / len(english_words) > 0.5 if english_words else False
     except Exception as e:
-        print(f"An error occurred while determining page language: {e}")
+        logging.error(f"An error occurred while determining page language: {e}")
+        #print(f"An error occurred while determining page language: {e}")
         return False
 
 # Function to insert a record into the SQLite database
@@ -59,10 +66,13 @@ def insert_record(cur, record, conn):
         ''', (record['url'], record['timestamp'], record['category'], record['predicted'], record['score']))
         conn.commit()
     except sqlite3.Error as e:
-        print(f"Error inserting record: {e}")
+        logging.error(f"Error inserting record: {e}")
+        #print(f"Error inserting record: {e}")
 
 # Function to process WARC records
 def process_warc_records(warc_file_path, cur, conn):
+    count = 0
+    start_time = time.time()
     try:
         with open(warc_file_path, 'rb') as stream:
             for record in ArchiveIterator(stream):
@@ -102,30 +112,44 @@ def process_warc_records(warc_file_path, cur, conn):
                                 'category': label_2
                             }
                             insert_record(cur, record_to_insert, conn)
-                            
+                            count += 1
+
                     except ValueError:
-                        print(f"Error parsing date: {warc_date}")
+                        #print(f"Error parsing date: {warc_date}")
+                        logging.error(f"Error parsing date: {warc_date}")
+
+            end_time = time.time()
+            elapsed_seconds = end_time - start_time
+            elapsed_time = str(timedelta(seconds=elapsed_seconds))
+            #print(f"Processed {count} WARC records in {elapsed_time}")
+            logging.info(f"Processed {count} WARC records in {elapsed_time}")
+
     except FileNotFoundError:
-        print(f"File not found: {warc_file_path}")
+        #print(f"File not found: {warc_file_path}")
+        logging.error(f"File not found: {warc_file_path}")
     except Exception as e:
-        print(f"An error occurred: {e}")
+        #print(f"An error occurred: {e}")
+        logging.error(f"An error occurred: {e}")
+
 
 # Function to process all WARC files in the specified directory
 def process_directory(warc_dir, conn):
     cur = conn.cursor()
-    
+
     for root, dirs, files in os.walk(warc_dir):
         for file in files:
             if file.endswith(".warc.gz"):
                 warc_file_path = os.path.join(root, file)
-                print(f"Processing {warc_file_path}...")
+                logging.info(f"Processing {warc_file_path}...")
+                #print(f"Processing {warc_file_path}...")
                 process_warc_records(warc_file_path, cur, conn)
 
 # Connect to SQLite using the provided database name
 try:
     conn = sqlite3.connect(args.db_name)
 except sqlite3.Error as e:
-    print(f"Error connecting to SQLite: {e}")
+    #print(f"Error connecting to SQLite: {e}")
+    logging.error(f"Error connecting to SQLite: {e}")
     sys.exit(1)
 
 # Process the directory
