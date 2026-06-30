@@ -6,7 +6,6 @@ Set up device configuration for GPU or CPU usage.
 import warnings
 import logging
 import ssl
-
 import torch
 
 
@@ -31,7 +30,7 @@ def get_classifier():
     import os
     from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-    model_name = "facebook/bart-large-mnli"
+    model_name = "FacebookAI/roberta-large-mnli"
     local_dir = model_name.replace("/", "_")
 
     if not os.path.exists(local_dir):
