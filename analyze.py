@@ -137,7 +137,7 @@ def feed_queue(warc_file_path, output_queue):
     output_queue.put(None)  # Signal that parsing is done
 
 
-def process_warc_records(warc_file_path, cur, conn, batch=150, category_batch=50):
+def process_warc_records(warc_file_path, cur, conn, batch=600, category_batch=200):
     """
     WARC files
         ↓
@@ -221,7 +221,7 @@ def process_warc_records(warc_file_path, cur, conn, batch=150, category_batch=50
         all_category_probs = probs_2.cpu()
         del inputs_2, logits_2, all_entail_2, entail_2, probs_2
         #log_gpu_mem("after category pass")
-        # Sentiment pass: lightweight (2 hypotheses, shorter texts) — fits in fragmented VRAM
+        # Sentiment pass second: lightweight (2 hypotheses, shorter texts) — fits in fragmented VRAM
         pairs_1 = []
         for text in texts:
             truncated = " ".join(text.split()[:15])
@@ -248,23 +248,29 @@ def process_warc_records(warc_file_path, cur, conn, batch=150, category_batch=50
         del inputs_1, logits_1, entail_1, probs_1
         torch.cuda.empty_cache()
         #log_gpu_mem("after sentiment pass")
-        # Map the predicted class to the label and include only the top category score
+        # Map the predicted class to the label and include all category scores
+        category_score_keys = [
+            'politics_score', 'business_score', 'technology_score', 'science_score',
+            'health_score', 'sports_score', 'entertainment_score', 'lifestyle_score',
+            'education_score', 'environment_score', 'crime_score', 'weather_score',
+            'economy_score', 'real_estate_score', 'automotive_score', 'travel_score']
         results = []
         for i in range(len(texts)):
             sentiment = 1 if predicted_class_1[i] == 0 else 0
             sentiment_score = max_scores_1[i].item()
-            top_idx = all_category_probs[i].argmax().item()
-            top_category = candidate_labels_2[top_idx]
-            category_score = all_category_probs[i, top_idx].item()
-            results.append((sentiment, sentiment_score, top_category, category_score))
+            top_category = candidate_labels_2[all_category_probs[i].argmax().item()]
+            cat_scores = {k: all_category_probs[i, j].item()
+                          for j, k in enumerate(category_score_keys)}
+            results.append((sentiment, sentiment_score, top_category, cat_scores))
         return results
 
-    # Create workers and queue. When the queue reaches maxsize,
-    # output_queue.put() in feed_queue blocks until the GPU consumer
+    # Create workers and queue. When the queue has 1200 items,
+    # output_queue.put() in feed_queue waits until the GPU consumer
     # pulls an item out. This prevents the parser from running too far
-    # ahead and filling up RAM with parsed records that the GPU hasn't
-    # processed yet.
-    queue = mp.Queue(maxsize=300)
+    # ahead and filling up RAM with thousands of parsed records that the
+    # GPU hasn't processed yet. The fast parser slows down to match the
+    # slower GPU consumer.
+    queue = mp.Queue(maxsize=1200)
     workers = []
     p = mp.Process(target=feed_queue, args=(warc_file_path, queue))
     p.start()
@@ -274,22 +280,21 @@ def process_warc_records(warc_file_path, cur, conn, batch=150, category_batch=50
     record_count = 0
 
     # Classify and store batches
-
-    for generated_batch in tqdm(generate_batch(queue, batch_size=batch), desc="Classifying"):
+    for generated_batch in tqdm(generate_patch(queue, batch_size=batch), desc="Classifying"):
         preds = classify_batch([item["text"] for item in generated_batch])
 
         # Store record in database
-        for item, (sentiment, sentiment_score, top_category, category_score) in zip(generated_batch,
-                                                                                    preds):
+        for item, (sentiment, sentiment_score, top_category, cat_scores) in zip(generated_batch,
+                                                                                preds):
             record = {
                 "url": item["url"],
                 "url_Timestamp": item["timestamp"],
                 "text": item["text"],
                 "category": top_category,
-                "category_score": category_score,
                 "sentiment": sentiment,
                 "sentiment_score": sentiment_score,
             }
+            record.update(cat_scores)
             insert_record(cur, record)
         conn.commit()
         record_count += len(generated_batch)
